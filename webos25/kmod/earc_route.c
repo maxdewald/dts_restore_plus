@@ -129,8 +129,11 @@ static int hd_native, gate_native;
 static u64 hd_name_last;           /* the name table's last entry: a string in the kernel image */
 static u32 hd_status_seen, hd_status_accepts, hd_name_seen, hd_name_fixes;
 static u32 hd_status_prints, hd_accept_prints, hd_name_prints, hd_fix_prints;
-/* Mode 7's app lease: renderer index + 1 while a /dev/earc_route holder has it open. */
+/* Mode 7's app lease: renderer index + 1 while a /dev/earc_route holder has it open.
+ * The low bits of lease_word decide; app_route is its copy for sysfs. */
 static u32 app_route, app_overrides, app_prints, lease_registered;
+static unsigned long lease_word;
+#define APP_ROUTE() ((u32)(__atomic_load_n(&lease_word, __ATOMIC_ACQUIRE) & 3))
 static u32 matched_decoder = EARC_NO_DECODER;  /* the last _set_output match's decoder (0 or 1) */
 static struct target_kprobe input_start_probe, input_property_probe, mix_probe;
 static u32 mix_registered, mix_clears;
@@ -524,7 +527,7 @@ static int route_prehandler(struct target_kprobe *p, struct target_pt_regs *regs
     (void)p;
     __atomic_add_fetch(&calls_seen, 1, __ATOMIC_RELAXED);
     if (descriptor) mask_word = *(volatile u32 *)(descriptor + hdmi.mask_offset);
-    if (descriptor && earc_app_policy_match(index, mask_word, __atomic_load_n(&app_route, __ATOMIC_ACQUIRE))) {
+    if (descriptor && earc_app_policy_match(index, mask_word, APP_ROUTE())) {
         if (__atomic_add_fetch(&app_prints, 1, __ATOMIC_RELAXED) <= 5)
             printk("\0016earc_route: app bypass index=%llu codec-arg=%u bypass-arg=%u\n",
                    (unsigned long long)index, (u32)regs->regs[2], (u32)regs->regs[3]);
@@ -888,7 +891,7 @@ static void input_unmute(unsigned int decoder) {
     mutex_lock(DECODER_LOCK);
     matched = __atomic_load_n(&matched_decoder, __ATOMIC_RELAXED);
     earc_adec_slot(&hdmi, decoder, &slot);
-    eligible = !__atomic_load_n(&app_route, __ATOMIC_ACQUIRE) && INPUT_AT(decoder) &&
+    eligible = !APP_ROUTE() && INPUT_AT(decoder) &&
         earc_input_unmute(1, decoder, 1, matched, *(volatile u32 *)slot.codec,
             *(volatile u8 *)slot.open, *(volatile u8 *)slot.started);
     mutex_unlock(DECODER_LOCK);
@@ -920,28 +923,35 @@ static int window_thread(void *unused) {
 }
 
 /* /dev/earc_route: the app lease lives as long as the open file. Writing "1" or
- * "2" (renderer index + 1) takes it; the kernel's release on the last close,
- * a crash or kill included, drops it. One holder at a time. struct
+ * "2" (renderer index + 1) takes it; the kernel's release on close, a crash or
+ * kill included, drops it. The latest writer holds it: at a track switch the
+ * new decoder takes it while the old one drains, and the old one's close then
+ * leaves it alone. lease_word is the holder's file | its value, app_route a
+ * copy of the value. struct
  * file_operations is laid out from the slots misc_open and __fput use (hdmi.fops_*);
  * struct miscdevice is minor, name, fops (+0, +8, +16) on both generations. */
 struct target_file;
 extern struct target_module __this_module;  /* the fops owner: pins the module while the file is open */
-static u32 lease_holders;
 static int lease_open(void *inode, struct target_file *file) {
     (void)inode; (void)file;
-    return __atomic_exchange_n(&lease_holders, 1, __ATOMIC_ACQ_REL) ? -16 : 0;
+    return 0;
 }
 static int lease_release(void *inode, struct target_file *file) {
-    (void)inode; (void)file;
-    if (__atomic_exchange_n(&app_route, 0, __ATOMIC_ACQ_REL)) printk("\0016earc_route: app lease released\n");
-    __atomic_store_n(&lease_holders, 0, __ATOMIC_RELEASE);
+    unsigned long word = __atomic_load_n(&lease_word, __ATOMIC_ACQUIRE);
+    (void)inode;
+    if ((word & ~3UL) == (unsigned long)file &&
+        __atomic_compare_exchange_n(&lease_word, &word, 0, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        __atomic_store_n(&app_route, 0, __ATOMIC_RELEASE);
+        if (word & 3) printk("\0016earc_route: app lease released\n");
+    }
     return 0;
 }
 static long lease_write(struct target_file *file, const char *user, unsigned long length, long long *position) {
     char value = 0;
-    (void)file; (void)position;
+    (void)position;
     if (length < 1 || length > 2 || copy_from_user(&value, user, 1)) return -22;
     if (value < '0' || value > '2') return -22;
+    __atomic_store_n(&lease_word, (unsigned long)file | (unsigned long)(value - '0'), __ATOMIC_RELEASE);
     __atomic_store_n(&app_route, (u32)(value - '0'), __ATOMIC_RELEASE);
     return (long)length;
 }
@@ -957,7 +967,7 @@ static struct target_miscdevice lease_device;
 static int mix_prehandler(struct target_kprobe *p, struct target_pt_regs *regs) {
     long *mix = (long *)(regs->regs[1] + hdmi.mix_offset);
     (void)p;
-    if (__atomic_load_n(&app_route, __ATOMIC_ACQUIRE) && *mix) {
+    if (APP_ROUTE() && *mix) {
         *mix = 0;
         __atomic_add_fetch(&mix_clears, 1, __ATOMIC_RELAXED);
     }

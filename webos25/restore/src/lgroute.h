@@ -12,6 +12,7 @@ typedef struct {
   gboolean first, feeding, configured, failed, unmixed, restart_pending, waiting, draining, own;
   gboolean native_es;
   gboolean in_mixer;   /* the kernel feeds eARC from LG's mixer, whatever the mixer word says */
+  gboolean rerouted;   /* LG was asked once to route this stream again */
   guint restarts;
   gint64 next_check, mixed_since, configured_at;
   gint64 restart_after;   /* a track-switch restart waits until LG has settled */

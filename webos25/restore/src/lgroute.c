@@ -581,6 +581,12 @@ static GstPadProbeReturn buffer_probe (GstPad *pad, GstPadProbeInfo *info, gpoin
     route->in_mixer = bypassing == 0 && !access (BYPASS_SEEN, F_OK);
   }
   gboolean in_mixer = unmixed > 0 && route->in_mixer;
+  /* After a track switch LG keeps the previous track's mixer route; rewriting
+   * the output type makes it run _set_output again, where the lease bypasses. */
+  if (in_mixer && route->lease_fd >= 0 && !route->rerouted) {
+    route->rerouted = TRUE;
+    lgroute_control_unmix ();
+  }
   if (in_mixer)
     unmixed = 0;
   /* The sink takes no buffers while it prerolls or is paused, so that time says
@@ -872,7 +878,7 @@ void lgroute_disarm (LgRoute *route)
   route->events = route->buffers = 0;
   route->mixed_since = 0;
   route->first = route->feeding = route->configured = route->unmixed = FALSE;
-  route->restart_pending = route->waiting = route->draining = route->in_mixer = FALSE;
+  route->restart_pending = route->waiting = route->draining = route->in_mixer = route->rerouted = FALSE;
   route->restarts = 0;
   int lease_fd = route->lease_fd;
   route->lease_fd = -1;

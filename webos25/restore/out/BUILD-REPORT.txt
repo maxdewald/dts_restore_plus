@@ -56,10 +56,10 @@ libgstdtsdec.so
                 gst_element_register_dtsdec, gst_plugin_dtsdec_register,
                 gst_plugin_dtsdec_get_desc, gst_truehd_mat_get_type and the
                 lgroute_* / lgroute_control_* helpers
-  size        : 3463644 bytes
-  md5         : abc5a72870e558278523702d61f146d7
-  sha1        : 78fe3e9c33b0698b8e0466c4da0216f1872a4a38
-  sha256      : d574cae1645b9ffcfa47e95047827f2cb3ed3f96b5b6712957836050483ba9ec
+  size        : 3467740 bytes
+  md5         : f6cd9ad684e4add507d63c0d2a9f6c61
+  sha1        : ec98854297ca0054c0b4735d60f24a4c4dad3f08
+  sha256      : e99d543a274156c0721c3436931a93a48900f647aaad46e5735b3c1d04ce7f57
 
 lgroute-control
 ---------------
@@ -180,6 +180,15 @@ reached EOS. These latest tests are pipeline evidence, not an audibility verdict
 Managed mode-7 load/stop and busy-descriptor refusal passed.
 6.12 remains host-tested only and disabled for automatic loading. DTS MKV and
 BD-framed TrueHD TS/M2TS were not exercised with this build.
+The 2026-11-14 build fixes a DTS track chosen after an AC3 track in the same
+file: LG kept the previous track's mixer route, so the route gave up after a
+second ("LG keeps the carrier in its mixer"). While earc_route's lease is held,
+the first such reading now rewrites LG's "Sndout EARC Outputtype" once, which
+makes LG run _set_output again with the lease's bypass. On C2 33.31.68 with an
+eARC receiver, in the app's player: AC3 then DTS failed 3 of 3 before and
+passed 8 of 8 AC3 -> DTS -> AC3 cycles after (eARC [ARC] Pass-Through for 6 s
+of each DTS stretch); the four DTS samples, DTS MKV, pause/resume, a seek and
+DTS -> AC3 -> DTS also passed. lgroute-control rebuilt byte-identically.
 
 This report is maintained by hand: update it whenever out/libgstdtsdec.so is
 rebuilt (build.sh prints the ABI values above).

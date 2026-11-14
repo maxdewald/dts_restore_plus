@@ -473,13 +473,19 @@ static void resume_tests (void)
   g_assert_cmpint (carrier (&route, FALSE), ==, GST_PAD_PROBE_OK);
   g_assert_false (last_silent);
   g_assert_true (g_file_test (BYPASS_SEEN, G_FILE_TEST_EXISTS));
-  /* From then on, a carrier LG keeps in its mixer goes out as silence... */
+  /* From then on, a carrier LG keeps in its mixer goes out as silence, and LG
+   * is asked once to route it again (its route after a track switch)... */
   g_assert_true (g_file_set_contents (LGROUTE_SNDOUT, ARC_STATUS ("PCM"), -1, NULL));
   g_unlink (ROUTE_LOG);
   route.next_check = 0;
+  int before_unmixes = unmixes;
   g_assert_cmpint (carrier (&route, FALSE), ==, GST_PAD_PROBE_OK);
   g_assert_true (last_silent);
   g_assert_false (route.failed);
+  g_assert_cmpint (unmixes, ==, before_unmixes + (route.lease_fd >= 0));
+  route.next_check = 0;
+  g_assert_cmpint (carrier (&route, FALSE), ==, GST_PAD_PROBE_OK);
+  g_assert_cmpint (unmixes, ==, before_unmixes + (route.lease_fd >= 0));
   /* ...comes back when LG takes the bypass route again... */
   g_assert_true (g_file_set_contents (LGROUTE_SNDOUT, ARC_STATUS ("Pass-Through"), -1, NULL));
   g_assert_cmpint (carrier (&route, FALSE), ==, GST_PAD_PROBE_OK);

@@ -16,26 +16,31 @@ function oneLine(name) {
   return l[0];
 }
 function tmp(prefix) { return fs.mkdtempSync(path.join(os.tmpdir(), prefix)); }
+var CHECK_OK = 'echo "earc-route: CHECK OK: kernel x takes earc_route-5.4.ko"';
 function read(file) { return fs.existsSync(file) ? fs.readFileSync(file, "utf8") : null; }
 
-test("the module runs on verified 5.4 kernels and refuses unverified 6.12", function () {
+test("the loader's check decides the fit; only kernels run on are enabled", function () {
   var dir = tmp("dts-kmod-refusal-");
   try {
     var kmod = path.join(dir, "hdmi"), core = path.join(dir, "lg-dts-core"), gh = path.join(dir, "lg-dts-native");
-    ["earc_route-5.4.ko", "earc_route-6.12.ko", "earc-route-load.sh"].forEach(function (f) { write(path.join(kmod, f), "x"); });
+    var loader = path.join(kmod, "earc-route-load.sh");
+    function loaderSays(line) { write(loader, '[ "$1" = --check ] || exit 9\necho "' + line + '"\n' + (/REFUSED/.test(line) ? "exit 1\n" : "")); }
     var fn = initFn("w25_kmod_refusal").split("/var/lib/lg-dts-core").join(core).split("/var/lib/lg-dts-native").join(gh);
     function refusal(kernel) {
       var r = sh(['uname() { echo "' + kernel + '"; }', "KMOD_DIR=" + kmod, fn, 'printf "[%s]" "$(w25_kmod_refusal)"'].join("\n"));
       assert.strictEqual(r.status, 0, r.stderr);
       return r.stdout;
     }
+    assert.strictEqual(refusal("5.4.268-329.ptl4tv.5"), "[payload]", "no loader installed");
+    loaderSays("earc-route: CHECK OK: kernel x takes earc_route-5.4.ko");
     assert.strictEqual(refusal("5.4.268-329.ptl4tv.5"), "[]");
     assert.strictEqual(refusal("5.4.268-329.ptl4tv.2"), "[]");
-    assert.strictEqual(refusal("6.12.44-352"), "[kernel-6.12]");
+    assert.strictEqual(refusal("5.4.268-320"), "[unverified]", "fits, never run on");
+    assert.strictEqual(refusal("6.12.44-352"), "[unverified]");
+    loaderSays("earc-route: REFUSED: 0 of earc_route-5.4.ko match this kernel");
+    assert.strictEqual(refusal("5.4.268-329.ptl4tv.5"), "[kernel]", "the check outranks the release list");
     assert.strictEqual(refusal("6.6.1"), "[kernel]");
-    assert.strictEqual(refusal("5.4.268-329.ptl4tv.9"), "[kernel]");
-    fs.unlinkSync(path.join(kmod, "earc_route-6.12.ko"));
-    assert.strictEqual(refusal("6.12.44-352"), "[kernel-6.12]");
+    loaderSays("earc-route: CHECK OK: kernel x takes earc_route-5.4.ko");
     write(path.join(gh, "enabled"));
     assert.strictEqual(refusal("5.4.268-329.ptl4tv.5"), "[glasshouse]");
     write(path.join(core, "enabled"));
@@ -99,7 +104,7 @@ test("a load the TV did not survive is not retried at boot; turning DTS-HD on cl
   var dir = tmp("dts-kmod-crash-");
   try {
     var kmod = path.join(dir, "hdmi");
-    ["earc_route-5.4.ko", "earc-route-load.sh"].forEach(function (f) { write(path.join(kmod, f), "x"); });
+    write(path.join(kmod, "earc-route-load.sh"), CHECK_OK);
     write(path.join(kmod, "loading"), "");
     var r = sh(['uname() { echo 5.4.268-329.ptl4tv.5; }', "KMOD_DIR=" + kmod, initFn("w25_kmod_refusal"), "w25_kmod_refusal"].join("\n"));
     assert.strictEqual(r.stdout, "crashed\n");
@@ -167,7 +172,7 @@ test("passthrough starts and stops the module; boot, stand-down, self-heal, Disa
   try {
     exe(path.join(dir, "bin", "systemd-run"), 'echo "$*" > "' + args + '"');
     var kmod = path.join(dir, "hdmi");
-    ["earc_route-5.4.ko", "earc-route-load.sh"].forEach(function (f) { write(path.join(kmod, f), "x"); });
+    write(path.join(kmod, "earc-route-load.sh"), CHECK_OK);
     ok(sh(["set -u", 'PATH="' + path.join(dir, "bin") + ':$PATH"', 'uname() { echo 5.4.268-329.ptl4tv.5; }',
       "KMOD_DIR=" + kmod, "KMOD_OUT=" + path.join(dir, "out"), "KMOD_UNIT=dts25-earc.service", "INIT_SELF=/x",
       "PT_FLAG=" + args, "HD_FLAG=" + args, ': > "$PT_FLAG"', "w25_log() { :; }", "systemctl() { return 1; }",
@@ -209,7 +214,7 @@ test("install.sh and Enable stage the module and its loader", function () {
 test("the read-only probe reports the module", function () {
   var r = sh(service.DETECT_PROBE);
   assert.strictEqual(r.status, 0, r.stderr);
-  ["KMOD_KERNEL=", "KMOD_REFUSAL=kernel", "KMOD_LOADED=0", "KMOD_LOADER="].forEach(function (k) {
+  ["KMOD_KERNEL=", "KMOD_REFUSAL=payload", "KMOD_LOADED=0", "KMOD_LOADER="].forEach(function (k) {
     assert.match(r.stdout, new RegExp("^" + k, "m"), k);
   });
 });
@@ -236,14 +241,17 @@ test("turning DTS-HD on refuses where the module cannot run; status says whether
   return Promise.all([
     call(mockedService({}, "KMOD_REFUSED=kernel\nKMOD_KERNEL=6.6.1\n"), "setPassthrough", {enabled: true, hd: true}).then(function (res) {
       assert.strictEqual(res.returnValue, false);
-      assert.match(res.errorText, /DTS-HD needs a supported kernel; this TV has 6\.6\.1/);
+      assert.match(res.errorText, /does not fit this TV's kernel \(6\.6\.1\)/);
     }),
     call(mockedService({KMOD_KERNEL: "5.4.268-329.ptl4tv.5", KMOD_REFUSAL: "", KMOD_LOADED: "1"}, "HD_FLAG=1\n"), "status").then(function (s) {
       assert.strictEqual(s.kmodLoaded, true);
       assert.strictEqual(s.kmodRefusal, "");
     }),
     call(mockedService({KMOD_KERNEL: "6.6.1", KMOD_REFUSAL: "kernel", KMOD_LOADED: "0"}, ""), "status").then(function (s) {
-      assert.match(s.kmodRefusal, /supported kernel/);
+      assert.match(s.kmodRefusal, /does not fit/);
+    }),
+    call(mockedService({KMOD_KERNEL: "5.4.268-320", KMOD_REFUSAL: "unverified", KMOD_LOADED: "0"}, ""), "status").then(function (s) {
+      assert.match(s.kmodRefusal, /fits this TV's kernel \(5\.4\.268-320\) but has not been tested/);
     }),
     call(mockedService({}, "WARN_KMOD=The DTS-HD kernel module could not undo all of its changes. Restart the TV.\nREG_REVERTED=1\nOK\n"), "disable").then(function (res) {
       assert.match(res.warning, /could not undo all of its changes/);

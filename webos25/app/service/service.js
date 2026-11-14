@@ -519,17 +519,19 @@ var W25_COMPAT_SH = [
   "KMOD_OUT=/run/dts25/hdmi-watch.out",
   "KMOD_MODULE=/sys/module/earc_route",
   "KMOD_UNIT=dts25-earc.service",
-  "# Why the module cannot run on this TV, or nothing.",
+  "# Why the module cannot run on this TV, or nothing. The loader's own check",
+  "# decides whether a build fits this kernel; the release list only marks the",
+  "# kernels the module has been run on.",
   "w25_kmod_refusal() {",
+  "  if [ ! -f \"$KMOD_DIR/earc-route-load.sh\" ]; then echo payload; return 0; fi",
+  "  sh \"$KMOD_DIR/earc-route-load.sh\" --check >/dev/null 2>&1 || { echo kernel; return 0; }",
   "  case $(uname -r) in",
-  "    5.4.268-329.ptl4tv.5|5.4.268-329.ptl4tv.2) KO=earc_route-5.4.ko ;;",
-  "    6.12.*) echo kernel-6.12; return 0 ;;",
-  "    *) echo kernel; return 0 ;;",
+  "    5.4.268-329.ptl4tv.5|5.4.268-329.ptl4tv.2) ;;",
+  "    *) echo unverified; return 0 ;;",
   "  esac",
   "  if [ -f \"$KMOD_DIR/loading\" ]; then echo crashed",
   "  elif [ -f /var/lib/lg-dts-core/enabled ]; then echo lg-dts-core",
   "  elif [ -f /var/lib/lg-dts-native/enabled ]; then echo glasshouse",
-  "  elif [ ! -f \"$KMOD_DIR/$KO\" ] || [ ! -f \"$KMOD_DIR/earc-route-load.sh\" ]; then echo payload",
   "  fi",
   "  return 0",
   "}",
@@ -4146,8 +4148,8 @@ service.register("setAppDts", function (message) {
 /** Why earc_route cannot run here (w25_kmod_refusal), as a sentence; DTS-HD needs it. */
 function w25KmodReason(code, kernel) {
   switch (code) {
-    case "kernel-6.12": return "DTS-HD on kernel 6.12 is not yet verified on a real TV and is disabled.";
-    case "kernel": return "DTS-HD needs a supported kernel; this TV has " + (kernel || "an unknown one") + ".";
+    case "unverified": return "The DTS-HD kernel module fits this TV's kernel (" + (kernel || "unknown") + ") but has not been tested on it yet, so it is disabled.";
+    case "kernel": return "The DTS-HD kernel module does not fit this TV's kernel (" + (kernel || "unknown") + ").";
     case "crashed": return "The TV restarted while the DTS-HD kernel module was loading, so it is not loaded again. Turn DTS-HD off and on to retry.";
     case "lg-dts-core": return "lg-dts-core is enabled on this TV. Disable it first: its kernel hooks would collide.";
     case "glasshouse": return "Glasshouse DTS forwarding is enabled on this TV. Disable it first: its kernel hooks would collide.";

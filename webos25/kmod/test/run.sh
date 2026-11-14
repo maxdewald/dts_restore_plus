@@ -75,6 +75,8 @@ while [ $# -ge 3 ]; do
   cp "$dir/kallsyms.txt" "$root/proc/kallsyms"
   printf '#!/bin/sh\necho %s\n' "$release" > "$BUILD/bin/uname"; chmod +x "$BUILD/bin/uname"
   out=$(PATH="$BUILD/bin:$PATH" EARC_LOADER_ROOT="$root" sh "$BUILD/app/earc-route-load.sh" 2>&1) || true
+  check=$(PATH="$BUILD/bin:$PATH" EARC_LOADER_ROOT="$root" sh "$BUILD/app/earc-route-load.sh" --check 2>&1 | tail -n 1) || true
+  echo "GATE $dir ($release): $check"
   if [ "$want" = refuse ]; then
     if printf '%s\n' "$out" | grep -q 'REFUSED: kallsyms:' && ! printf '%s\n' "$out" | grep -q 'loading '; then
       echo "PASS loader $dir ($release): refused before insmod: $(printf '%s\n' "$out" | tail -n1)"

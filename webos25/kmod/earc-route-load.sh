@@ -3,6 +3,7 @@
 #
 #   sh earc-route-load.sh                    audit: decode, print, unload (mode=0)
 #   sh earc-route-load.sh --dts-hd           the session (mode=7), until rmmod earc_route
+#   sh earc-route-load.sh --check            every loader check and the build choice, no insmod
 #
 # Runs as root, on the TV only (busybox sh + python3). There is no release
 # allowlist: the running kernel is checked, not its name. The loader refuses
@@ -22,14 +23,15 @@ refuse() { echo "earc-route: REFUSED: $*"; exit 1; }
 
 [ "$(id -u)" = 0 ] || refuse "must run as root"
 release=$(uname -r)
-[ ! -e "$ROOT/sys/module/earc_route" ] || refuse "earc_route is already loaded"
 options="mode=0"
 want_mode=0
 case "$*" in
   '') ;;
   --dts-hd) options="mode=7"; want_mode=7 ;;
-  *) refuse "usage: $0 [--dts-hd]" ;;
+  --check) want_mode=check ;;
+  *) refuse "usage: $0 [--dts-hd|--check]" ;;
 esac
+[ "$want_mode" = check ] || [ ! -e "$ROOT/sys/module/earc_route" ] || refuse "earc_route is already loaded"
 
 # The session refuses to load beside another DTS tool, whose kprobes or gate
 # change would collide with ours.
@@ -210,6 +212,7 @@ PY
 ) || refuse "$parameters"
 KO=${parameters%% *}
 parameters=${parameters#* }
+if [ "$want_mode" = check ]; then echo "earc-route: CHECK OK: kernel $release takes $(basename "$KO")"; exit 0; fi
 INSMOD=$(command -v insmod || true)
 if [ -z "$INSMOD" ] && [ -x /sbin/insmod ]; then INSMOD=/sbin/insmod; fi
 [ -n "$INSMOD" ] || refuse "insmod not found"

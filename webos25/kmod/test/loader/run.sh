@@ -168,6 +168,16 @@ insmod_stub "$CANCEL"
 expect "original 6.12 ABI still selects the original build beside C6" 0 "AUDIT OK"
 loaded earc_route-6.12.ko
 
+setup 6.12.44-352 /usr/lib/modules "$V612" 0x4c0 0x138 0x480
+mkdir -p "$WORK/root/sys/module/earc_route"
+insmod_stub 'echo called > /dev/null'
+expect "--check names the build without insmod, even while loaded" 0 "CHECK OK: kernel 6.12.44-352 takes earc_route-6.12.ko" --check
+not_loaded
+setup 5.4.268-329.ptl4tv.5 /lib/modules "$V54" 0x388 0x150 0x338
+insmod_stub "$CANCEL"
+expect "--check refuses a kernel no build fits" 1 "0 of .* match this kernel" --check
+not_loaded
+
 setup 5.10.0-1 /lib/modules '5.10.0 SMP preempt mod_unload aarch64' 0x3c0 0x150 0x370
 insmod_stub "$CANCEL"
 expect "unknown kernel generation refuses" 1 "0 of earc_route-5.4.ko, earc_route-6.12.ko match this kernel"

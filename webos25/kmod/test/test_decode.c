@@ -936,6 +936,16 @@ HDMI_MUTATION(input_table_offset_changed) {
     w[compare - 2] ^= 1u << 10;
     return 1;
 }
+/* The instruction before the argument load -> mul x9, x9, x9: one input of the
+ * table address now comes from an untracked computation. */
+HDMI_MUTATION(input_address_unknown) {
+    ed_u64 compare;
+    HDMI_UNUSED;
+    compare = (g->input_compare - f->address) / 4;
+    if (compare < 3 || compare >= n) return 0;
+    w[compare - 3] = 0x9b097d20u | (w[compare - 3] & 31);
+    return 1;
+}
 HDMI_MUTATION(input_frame_changed) {
     ed_u32 index;
     HDMI_UNUSED;
@@ -1452,8 +1462,10 @@ static void input_capture_tests(const struct kernel *kernel, const struct earc_h
     hdmi_refuse(kernel, HF_alsa_decoder_start, "HDMI input load destination changed", "not found",
                 input_load_destination_changed, input_reason, 0, layout);
     if (getter->address == 0xffffffc010cd2bb0ULL || getter->address == 0xffffffc010cd7f60ULL)
-        hdmi_refuse(kernel, HF_alsa_decoder_start, "HDMI input table offset changed", "not found",
+        hdmi_refuse(kernel, HF_alsa_decoder_start, "HDMI input table offset changed", "offsets disagree",
                     input_table_offset_changed, input_reason, 0, layout);
+    hdmi_refuse(kernel, HF_alsa_decoder_start, "HDMI input address not a table lookup", "not found",
+                input_address_unknown, input_reason, 0, layout);
     hdmi_refuse(kernel, HF_input_get_hdmi_codec, "HDMI getter breakpoint", "not a word load",
                 entry_kprobe, input_reason, 0, layout);
     hdmi_refuse(kernel, HF_input_set_hdmi, "HDMI stack frame changed", "ambiguous",

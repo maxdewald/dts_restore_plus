@@ -648,44 +648,161 @@ static void hd_break(const struct earc_code *fns, struct earc_hdmi_layout *out) 
     out->break_reason = 0;
 }
 
+/* May op write general register r? Unknown forms answer yes, which only refuses. */
+static int hf_writes(ed_u32 op, unsigned int r) {
+    unsigned int rt = op & 31, rn = (op >> 5) & 31, rt2 = (op >> 10) & 31, mode;
+    if ((op & 0x1c000000u) == 0x14000000u) {  /* branches, exceptions, system */
+        if ((op & 0xfc000000u) == 0x94000000u || (op & 0xfffffc1fu) == 0xd63f0000u) return r <= 18 || r == 30;
+        if ((op & 0xfff00000u) == 0xd5300000u || (op & 0xfff80000u) == 0xd5280000u) return rt == r;
+        return 0;
+    }
+    if ((op & 0x0a000000u) == 0x08000000u) {  /* loads and stores */
+        if ((op & 0x3a000000u) == 0x28000000u) {  /* pair */
+            mode = (op >> 23) & 3;
+            return (((op >> 22) & 1) && (r == rt || r == rt2)) || ((mode == 1 || mode == 3) && r == rn);
+        }
+        if ((op & 0x3b000000u) == 0x39000000u) return ((op >> 22) & 3) && r == rt;  /* unsigned offset */
+        if ((op & 0x3b200000u) == 0x38000000u) {  /* unscaled, post-index, unprivileged, pre-index */
+            mode = (op >> 10) & 3;
+            return (((op >> 22) & 3) && r == rt) || ((mode == 1 || mode == 3) && r == rn);
+        }
+        if ((op & 0x3b200c00u) == 0x38200800u) return ((op >> 22) & 3) && r == rt;  /* register offset */
+        if ((op & 0x3b000000u) == 0x18000000u) return r == rt;                        /* literal */
+        return r == rt || r == rn || r == rt2 || r == ((op >> 16) & 31);
+    }
+    return rt == r;  /* data processing and SIMD: Rd */
+}
+
+/* A value as constant + sum of coef[i] * register reg[i]. */
+struct hf_linear {
+    unsigned int count, reg[4];
+    ed_u64 coef[4], constant;
+};
+static int hf_linear_add(struct hf_linear *v, unsigned int reg, ed_u64 coef) {
+    unsigned int i;
+    if (reg == 31) return 0;
+    for (i = 0; i < v->count; i++)
+        if (v->reg[i] == reg) { v->coef[i] += coef; return 1; }
+    if (v->count == 4) return 0;
+    v->reg[v->count] = reg;
+    v->coef[v->count++] = coef;
+    return 1;
+}
+
+/* Register reg just before instruction at, in terms of the registers at
+ * instruction stop, substituted back through ADD (immediate or LSL-shifted
+ * register), MOV and LSL. Returns 0 for any other definition. */
+static int hf_linear_at(const struct earc_code *fn, unsigned int at, unsigned int reg, unsigned int stop,
+                        struct hf_linear *v) {
+    unsigned int i, t, hit, rd, rn, rm;
+    v->count = 0;
+    v->constant = 0;
+    if (!hf_linear_add(v, reg, 1)) return 0;
+    for (i = at; i-- > stop;) {
+        ed_u32 op = fn->words[i];
+        ed_u64 k;
+        for (t = 0, hit = 4; t < v->count; t++)
+            if (hf_writes(op, v->reg[t])) { if (hit != 4) return 0; hit = t; }
+        if (hit == 4) continue;
+        k = v->coef[hit];
+        rd = op & 31; rn = (op >> 5) & 31; rm = (op >> 16) & 31;
+        if (rd != v->reg[hit]) return 0;
+        v->reg[hit] = v->reg[--v->count];
+        v->coef[hit] = v->coef[v->count];
+        if ((op & 0xff800000u) == 0x91000000u) {  /* ADD Xd, Xn, #imm{, lsl #12} */
+            if (!hf_linear_add(v, rn, k)) return 0;
+            v->constant += k * ((ed_u64)((op >> 10) & 0xfff) << (((op >> 22) & 1) * 12));
+        } else if ((op & 0xffe0ffe0u) == 0xaa0003e0u) {  /* MOV Xd, Xm */
+            if (!hf_linear_add(v, rm, k)) return 0;
+        } else if ((op & 0xffe00000u) == 0x8b000000u) {  /* ADD Xd, Xn, Xm, lsl #s */
+            if (!hf_linear_add(v, rn, k) || !hf_linear_add(v, rm, k << ((op >> 10) & 63))) return 0;
+        } else if ((op & 0xffc00000u) == 0xd3400000u && ((op >> 10) & 63) != 63 &&
+                   ((((op >> 10) & 63) + 1) & 63) == ((op >> 16) & 63)) {  /* LSL Xd, Xn, #s */
+            if (!hf_linear_add(v, rn, k << (63 - ((op >> 10) & 63)))) return 0;
+        } else {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* The address of the 64-bit load at instruction at, from the start of its block. */
+static int hf_load_address(const struct earc_code *fn, unsigned int at, struct hf_linear *v) {
+    ed_u32 op = fn->words[at];
+    unsigned int stop = at, rn = (op >> 5) & 31, i;
+    struct hf_linear index;
+    while (stop > 0 && !hf_target[stop]) stop--;
+    if ((op & 0xffc00000u) == 0xf9400000u) {  /* LDR Xt, [Xn, #imm] */
+        if (!hf_linear_at(fn, at, rn, stop, v)) return 0;
+        v->constant += ((op >> 10) & 0xfff) * 8;
+        return 1;
+    }
+    if ((op & 0xffe0fc00u) == 0xf8606800u) {  /* LDR Xt, [Xn, Xm] */
+        if (!hf_linear_at(fn, at, rn, stop, v) || !hf_linear_at(fn, at, (op >> 16) & 31, stop, &index)) return 0;
+        for (i = 0; i < index.count; i++)
+            if (!hf_linear_add(v, index.reg[i], index.coef[i])) return 0;
+        v->constant += index.constant;
+        return 1;
+    }
+    return 0;
+}
+
+/* A 16-byte-entry table lookup: base register + 16 * index register + offset. */
+static int hf_table_lookup(const struct hf_linear *v, unsigned int *base, unsigned int *index) {
+    if (v->count != 2 || v->constant >= 0x1000 || (v->constant & 7)) return 0;
+    if (v->coef[0] == 1 && v->coef[1] == 16) { *base = v->reg[0]; *index = v->reg[1]; return 1; }
+    if (v->coef[1] == 1 && v->coef[0] == 16) { *base = v->reg[1]; *index = v->reg[0]; return 1; }
+    return 0;
+}
+
+/* alsa_decoder_start calls input_get_hdmi_codec(table[decoder].input) and
+ * compares the result with 1. The table address is derived from the data flow
+ * into that call, whatever instructions compute it, and must match every other
+ * 16-byte-stride load the function makes through the same registers. */
 static void hd_input_start(const struct earc_code *fns, struct earc_hdmi_layout *out) {
     const struct earc_code *start = &fns[HF_alsa_decoder_start];
     const struct earc_code *get = &fns[HF_input_get_hdmi_codec];
-    unsigned int index, found = 0, table_reg = 31, tables = 0;
+    unsigned int index, found = 0, table_reg = 31, tables = 0, uses = 0;
     ed_u64 table_offset = 0;
-    out->input_reason = "HDMI start compare not found";
     if (!get->words || get->count < 2 || (get->words[0] & 0xffc003ffu) != 0xb9400000u ||
         get->words[1] != 0xd65f03c0u) {
         out->input_reason = "HDMI codec getter is not a word load followed by ret";
         return;
     }
-    if (!start->words) return;
-    for (index = 2; index + 2 < start->count; index++) {
-        ed_u32 call = start->words[index], shift = start->words[index - 2];
-        ed_u32 load = start->words[index - 1], cset = start->words[index + 2];
+    out->input_reason = hf_prepare(start);
+    if (out->input_reason) return;
+    for (index = 1; index + 2 < start->count; index++) {
+        ed_u32 call = start->words[index], cset = start->words[index + 2];
         ed_u64 target = start->address + 4ULL * index + ((ed_u64)ed_sext(call & 0x3ffffff, 26) << 2);
+        struct hf_linear argument;
+        unsigned int writer = index, base, decoder;
         if ((call & 0xfc000000u) != 0x94000000u || target != get->address) continue;
         if (start->words[index + 1] != 0x7100041fu || (cset & 0xffffffe0u) != 0x1a9f17e0u) continue;
-        if ((shift & 0xfffffc1fu) == 0xd37cec00u && (load & 0xffe0fc1fu) == 0xf8606800u &&
-            ((load >> 16) & 31) == 0 && ((load >> 5) & 31) != 31) {
-            out->input_index_reg = (shift >> 5) & 31;
-            table_reg = (load >> 5) & 31;
-            table_offset = 0;
-        } else if ((shift & 0xffe0fc1fu) == 0x8b001000u && load == 0xf9408800u &&
-                   ((shift >> 5) & 31) >= 19 && ((shift >> 5) & 31) <= 28) {
-            out->input_index_reg = (shift >> 16) & 31;
-            table_reg = (shift >> 5) & 31;
-            table_offset = 0x110;
-        } else continue;
-        if (out->input_index_reg < 19 || out->input_index_reg > 28) continue;
+        while (writer > 0 && !hf_target[writer] && !hf_writes(start->words[writer - 1], 0)) writer--;
+        if (writer == 0 || hf_target[writer]) continue;
+        if (!hf_load_address(start, writer - 1, &argument) ||
+            !hf_table_lookup(&argument, &base, &decoder) || decoder < 19 || decoder > 28) continue;
+        out->input_index_reg = decoder;
+        table_reg = base;
+        table_offset = argument.constant;
         out->input_compare = start->address + 4ULL * (index + 1);
         found++;
     }
     out->input_reason = found == 1 ? 0 : found ? "HDMI start compare is ambiguous" : "HDMI start compare not found";
     if (out->input_reason) return;
+    for (index = 0; index < start->count; index++) {
+        struct hf_linear address;
+        unsigned int base, decoder;
+        if (!hf_load_address(start, index, &address) || !hf_table_lookup(&address, &base, &decoder) ||
+            base != table_reg || decoder != out->input_index_reg) continue;
+        if (address.constant != table_offset) {
+            out->input_reason = "HDMI input table offsets disagree";
+            return;
+        }
+        uses++;
+    }
+    if (uses < 2) { out->input_reason = "HDMI input table used only by the start compare"; return; }
     out->input_codec_offset = ((get->words[0] >> 10) & 0xfff) * 4;
-    out->input_reason = hf_prepare(start);
-    if (out->input_reason) return;
     {
         /* The first BL with x0 = xB + imm, where xB = adrp + add earlier in the
          * function: straight-line constants a branch target cannot clobber. */
@@ -708,8 +825,7 @@ static void hd_input_start(const struct earc_code *fns, struct earc_hdmi_layout 
                         out->decoder_lock_call = start->address + 4ULL * at + ((ed_u64)ed_sext(next & 0x3ffffff, 26) << 2);
                         break;
                     }
-                    if ((next & 0x3a400000u) != 0x28000000u && (next & 0x3b400000u) != 0x39000000u &&
-                        ((next & 0x9f000000u) != 0x90000000u || (next & 31) == 0)) break;
+                    if (hf_writes(next, 0)) break;
                 }
             }
         }
@@ -718,9 +834,9 @@ static void hd_input_start(const struct earc_code *fns, struct earc_hdmi_layout 
     for (index = 0; index < start->count; index++) {
         struct hval previous = hf_reg[table_reg];
         hf_step(index);
+        /* The table base sits in the driver struct that also holds the ADEC slots. */
         if (hf_reg[table_reg].kind == HK_CONST && hf_reg[table_reg].c != previous.c &&
-            (table_offset ? hf_reg[table_reg].c == out->adec_base
-                          : hf_reg[table_reg].c <= out->adec_base && out->adec_base - hf_reg[table_reg].c <= 0x100) &&
+            hf_reg[table_reg].c <= out->adec_base && out->adec_base - hf_reg[table_reg].c <= 0x100 &&
             hf_reg[table_reg].c + table_offset != out->input_table) {
             out->input_table = hf_reg[table_reg].c + table_offset;
             tables++;

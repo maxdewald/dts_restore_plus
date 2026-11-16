@@ -837,6 +837,9 @@ gboolean lgroute_arm (LgRoute *route)
   }
   /* The probes run at once on sticky events, so the route is published first.
    * Until our caps reach the sink, what arrives there is the earlier stream's. */
+  route->native_es = !access (LGROUTE_RUN "/native-es", F_OK)
+      || (gst_pad_has_current_caps (pad)
+          && !access (LGROUTE_RUN "/native-es-hd-switch", F_OK));
   route->waiting = TRUE;
   g_mutex_lock (&route_lock);
   route->sink = sink;

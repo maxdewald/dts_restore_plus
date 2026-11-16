@@ -16,7 +16,9 @@ with app 2.7.71 or later (discussion #17). Other combinations are unverified.
 ## Full DTS-HD over eARC
 
 The exact tested C2 build uses LG's native ES bypass without synthetic renderer
-restarts. Other profiles keep the PCM bypass.
+restarts. On the tested G3 OLED77G36LA (33.31.68), switching to DTS-HD or
+TrueHD during playback uses native ES. Initial playback on that G3 and playback
+on other profiles use the PCM bypass.
 Both carry FFmpeg's IEC 61937 packing at 192 kHz. HD needs Digital Sound Output
 on Pass Through: Auto re-encodes and mixes TV sounds in.
 
